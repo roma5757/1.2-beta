@@ -2,11 +2,10 @@ import os
 import sqlite3
 import time
 import random
-from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ConversationHandler, ContextTypes, filters, JobQueue
+    CallbackQueryHandler, ConversationHandler, ContextTypes, filters
 )
 
 # ================= НАСТРОЙКИ =================
@@ -19,7 +18,7 @@ ANTI_SPAM_SECONDS = 10
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Угадай слово
+# Таблицы угадай слово
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS contest (
     word TEXT,
@@ -34,7 +33,7 @@ CREATE TABLE IF NOT EXISTS attempts (
 )
 """)
 
-# Giveaway
+# Таблицы Giveaway
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS giveaways (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +55,6 @@ conn.commit()
 
 # ================= ПРОВЕРКА ПОДПИСКИ =================
 async def is_subscribed(user_id, context):
-    """Проверка подписки (молча игнорируем если нет)"""
     try:
         member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
         return member.status in ["member", "administrator", "creator"]
@@ -134,27 +132,53 @@ async def giveaway_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WINNERS
 
 async def giveaway_winners(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["winners"] = int(update.message.text)
-    await update.message.reply_text("Через сколько минут завершить?")
+    try:
+        winners = int(update.message.text)
+        if winners <= 0 or winners > 100:
+            await update.message.reply_text("Введите число победителей от 1 до 100.")
+            return WINNERS
+        context.user_data["winners"] = winners
+    except ValueError:
+        await update.message.reply_text("Введите целое число.")
+        return WINNERS
+    await update.message.reply_text("Через сколько часов завершить конкурс? (Например, 1.5)")
     return TIME
 
 async def giveaway_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    minutes = int(update.message.text)
-    end_time = int(time.time()) + minutes * 60
-    text = f"🎁 <b>РОЗЫГРЫШ</b>\n\n{context.user_data['desc']}\n\n🏆 Победителей: {context.user_data['winners']}\n⏳ Итоги через {minutes} мин."
+    try:
+        hours = float(update.message.text)
+        if hours <= 0 or hours > 24:
+            await update.message.reply_text("Введите число от 0.1 до 24 часов.")
+            return TIME
+    except ValueError:
+        await update.message.reply_text("Введите число (например, 1.5 для полутора часов).")
+        return TIME
+
+    seconds = int(hours * 3600)
+    end_time = int(time.time()) + seconds
+
+    text = f"🎁 <b>РОЗЫГРЫШ</b>\n\n{context.user_data['desc']}\n\n🏆 Победителей: {context.user_data['winners']}\n⏳ Итоги через {hours} ч."
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎉 Участвовать (0)", callback_data="join")]])
 
-    if context.user_data["photo"]:
-        msg = await context.bot.send_photo(CHANNEL_USERNAME, context.user_data["photo"], caption=text, reply_markup=keyboard, parse_mode="HTML")
+    if context.user_data.get("photo"):
+        msg = await context.bot.send_photo(
+            CHANNEL_USERNAME, context.user_data["photo"],
+            caption=text, reply_markup=keyboard, parse_mode="HTML"
+        )
     else:
-        msg = await context.bot.send_message(CHANNEL_USERNAME, text, reply_markup=keyboard, parse_mode="HTML")
+        msg = await context.bot.send_message(
+            CHANNEL_USERNAME, text, reply_markup=keyboard, parse_mode="HTML"
+        )
 
-    cursor.execute("INSERT INTO giveaways (message_id, winners_count, end_time, is_active) VALUES (?, ?, ?, 1)",
-                   (msg.message_id, context.user_data["winners"], end_time))
+    cursor.execute(
+        "INSERT INTO giveaways (message_id, winners_count, end_time, is_active) VALUES (?, ?, ?, 1)",
+        (msg.message_id, context.user_data["winners"], end_time)
+    )
     conn.commit()
 
-    context.job_queue.run_once(finish_giveaway, minutes*60, data=msg.message_id)
-    await update.message.reply_text("Розыгрыш запущен!")
+    # Таймер через JobQueue
+    context.job_queue.run_once(finish_giveaway, when=seconds, data=msg.message_id)
+    await update.message.reply_text(f"Розыгрыш запущен на {hours} ч!")
     return ConversationHandler.END
 
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -200,7 +224,11 @@ async def finish_giveaway(context: ContextTypes.DEFAULT_TYPE):
     winners = participants[:winners_count]
     winners_text = "\n".join([f"@{w[0]}" for w in winners])
 
-    await context.bot.send_message(CHANNEL_USERNAME, f"🏆 <b>Победители:</b>\n{winners_text}", parse_mode="HTML")
+    await context.bot.send_message(
+        CHANNEL_USERNAME,
+        f"🏆 <b>Победители:</b>\n{winners_text}",
+        parse_mode="HTML"
+    )
     cursor.execute("UPDATE giveaways SET is_active=0 WHERE id=?", (giveaway_id,))
     conn.commit()
 
@@ -219,6 +247,7 @@ async def reroll(update: Update, context: ContextTypes.DEFAULT_TYPE):
     participants = cursor.fetchall()
     if not participants:
         return
+
     random.shuffle(participants)
     winners = participants[:winners_count]
     winners_text = "\n".join([f"@{w[0]}" for w in winners])
@@ -228,16 +257,17 @@ async def reroll(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = ApplicationBuilder().token(TOKEN).build()
 
 # ConversationHandler для угадай-слово
-conv_word = ConversationHandler(entry_points=[CommandHandler("admin", admin)],
-                                states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_word)]},
-                                fallbacks=[])
+conv_word = ConversationHandler(
+    entry_points=[CommandHandler("admin", admin)],
+    states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_word)]},
+    fallbacks=[]
+)
 
 # ConversationHandler для giveaway
 conv_give = ConversationHandler(
     entry_points=[CommandHandler("giveaway", giveaway_start)],
     states={
-        PHOTO: [MessageHandler(filters.PHOTO, giveaway_photo),
-                CommandHandler("skip", giveaway_skip)],
+        PHOTO: [MessageHandler(filters.PHOTO, giveaway_photo), CommandHandler("skip", giveaway_skip)],
         DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, giveaway_desc)],
         WINNERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, giveaway_winners)],
         TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, giveaway_time)]
