@@ -18,7 +18,6 @@ ANTI_SPAM_SECONDS = 10
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Таблицы угадай слово
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS contest (
     word TEXT,
@@ -32,8 +31,6 @@ CREATE TABLE IF NOT EXISTS attempts (
     last_attempt INTEGER
 )
 """)
-
-# Таблицы Giveaway
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS giveaways (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,7 +152,6 @@ async def giveaway_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return TIME
 
     seconds = int(hours * 3600)
-    end_time = int(time.time()) + seconds
 
     text = f"🎁 <b>РОЗЫГРЫШ</b>\n\n{context.user_data['desc']}\n\n🏆 Победителей: {context.user_data['winners']}\n⏳ Итоги через {hours} ч."
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎉 Участвовать (0)", callback_data="join")]])
@@ -172,12 +168,13 @@ async def giveaway_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cursor.execute(
         "INSERT INTO giveaways (message_id, winners_count, end_time, is_active) VALUES (?, ?, ?, 1)",
-        (msg.message_id, context.user_data["winners"], end_time)
+        (msg.message_id, context.user_data["winners"], int(time.time()) + seconds)
     )
     conn.commit()
 
-    # Таймер через JobQueue
-    context.job_queue.run_once(finish_giveaway, when=seconds, data=msg.message_id)
+    # Правильный запуск JobQueue
+    context.job_queue.run_once(finish_giveaway_job, when=seconds, data=msg.message_id)
+
     await update.message.reply_text(f"Розыгрыш запущен на {hours} ч!")
     return ConversationHandler.END
 
@@ -208,16 +205,20 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(f"🎉 Участвовать ({count})", callback_data="join")]])
     await query.edit_message_reply_markup(reply_markup=keyboard)
 
-async def finish_giveaway(context: ContextTypes.DEFAULT_TYPE):
+async def finish_giveaway_job(context: ContextTypes.DEFAULT_TYPE):
     message_id = context.job.data
     cursor.execute("SELECT id, winners_count FROM giveaways WHERE message_id=? AND is_active=1", (message_id,))
     g = cursor.fetchone()
     if not g:
         return
     giveaway_id, winners_count = g
+
     cursor.execute("SELECT username FROM giveaway_participants WHERE giveaway_id=?", (giveaway_id,))
     participants = cursor.fetchall()
     if not participants:
+        await context.bot.send_message(CHANNEL_USERNAME, "🎁 Розыгрыш завершён, но участников нет.")
+        cursor.execute("UPDATE giveaways SET is_active=0 WHERE id=?", (giveaway_id,))
+        conn.commit()
         return
 
     random.shuffle(participants)
@@ -256,14 +257,12 @@ async def reroll(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= РЕГИСТРАЦИЯ ХЭНДЛЕРОВ =================
 app = ApplicationBuilder().token(TOKEN).build()
 
-# ConversationHandler для угадай-слово
 conv_word = ConversationHandler(
     entry_points=[CommandHandler("admin", admin)],
     states={1: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_word)]},
     fallbacks=[]
 )
 
-# ConversationHandler для giveaway
 conv_give = ConversationHandler(
     entry_points=[CommandHandler("giveaway", giveaway_start)],
     states={
@@ -281,5 +280,4 @@ app.add_handler(CallbackQueryHandler(join, pattern="join"))
 app.add_handler(CallbackQueryHandler(reroll, pattern="reroll"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_word))
 
-# ================= ЗАПУСК =================
 app.run_polling()
